@@ -101,23 +101,44 @@ public class SXSLFPowerPointExtractorDecorator extends AbstractOOXMLExtractor {
 
         loadCommentAuthors();
 
+        // Get the correct slide order from presentation.xml
+        List<String> correctSlideOrder = getCorrectSlideOrder();
+        
+        // Create mapping from relationship ID to PackagePart
+        Map<String, PackagePart> slideMap = createSlideMapping();
 
-        PackageRelationshipCollection slidesPRC = null;
-        try {
-            slidesPRC = mainDocument.getRelationshipsByType(XSLFRelation.SLIDE.getRelation());
-        } catch (InvalidFormatException e) {
-            metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
-                    ExceptionUtils.getStackTrace(e));
-        }
+        // Process slides in correct order
+        if (correctSlideOrder != null && !correctSlideOrder.isEmpty()) {
+            for (String relId : correctSlideOrder) {
+                PackagePart slidePart = slideMap.get(relId);
+                if (slidePart != null) {
+                    try {
+                        handleSlidePart(slidePart, xhtml);
+                    } catch (InvalidFormatException | ZipException e) {
+                        metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
+                                ExceptionUtils.getStackTrace(e));
+                    }
+                }
+            }
+        } else {
+            // Fallback to original method if correct order can't be determined
+            PackageRelationshipCollection slidesPRC = null;
+            try {
+                slidesPRC = mainDocument.getRelationshipsByType(XSLFRelation.SLIDE.getRelation());
+            } catch (InvalidFormatException e) {
+                metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
+                        ExceptionUtils.getStackTrace(e));
+            }
 
-        if (slidesPRC != null && slidesPRC.size() > 0) {
-            for (int i = 0; i < slidesPRC.size(); i++) {
-                try {
-                    handleSlidePart(mainDocument.getRelatedPart(slidesPRC.getRelationship(i)),
-                            xhtml);
-                } catch (InvalidFormatException | ZipException e) {
-                    metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
-                            ExceptionUtils.getStackTrace(e));
+            if (slidesPRC != null && slidesPRC.size() > 0) {
+                for (int i = 0; i < slidesPRC.size(); i++) {
+                    try {
+                        handleSlidePart(mainDocument.getRelatedPart(slidesPRC.getRelationship(i)),
+                                xhtml);
+                    } catch (InvalidFormatException | ZipException e) {
+                        metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
+                                ExceptionUtils.getStackTrace(e));
+                    }
                 }
             }
         }
@@ -133,6 +154,91 @@ public class SXSLFPowerPointExtractorDecorator extends AbstractOOXMLExtractor {
                     metadata,
                     new OOXMLWordAndPowerPointTextHandler(new OOXMLTikaBodyPartHandler(xhtml),
                             new HashMap<>()));
+        }
+    }
+
+    /**
+     * Get the correct slide order from presentation.xml
+     * @return List of relationship IDs in correct presentation order
+     */
+    private List<String> getCorrectSlideOrder() {
+        List<String> correctOrder = new ArrayList<>();
+        try {
+            // Parse presentation.xml to get slide order
+            try (InputStream stream = mainDocument.getInputStream()) {
+                XMLReaderUtils.parseSAX(CloseShieldInputStream.wrap(stream),
+                        new PresentationOrderHandler(correctOrder), context);
+            }
+        } catch (IOException | SAXException | TikaException e) {
+            metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
+                    "Failed to parse presentation.xml for slide order: " + ExceptionUtils.getStackTrace(e));
+            return null;
+        }
+        return correctOrder;
+    }
+
+    /**
+     * Create mapping from relationship ID to PackagePart
+     * @return Map of relationship ID to PackagePart
+     */
+    private Map<String, PackagePart> createSlideMapping() {
+        Map<String, PackagePart> slideMap = new HashMap<>();
+        PackageRelationshipCollection slidesPRC = null;
+        try {
+            slidesPRC = mainDocument.getRelationshipsByType(XSLFRelation.SLIDE.getRelation());
+        } catch (InvalidFormatException e) {
+            metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
+                    ExceptionUtils.getStackTrace(e));
+            return slideMap;
+        }
+
+        if (slidesPRC != null && slidesPRC.size() > 0) {
+            for (int i = 0; i < slidesPRC.size(); i++) {
+                try {
+                    PackageRelationship rel = slidesPRC.getRelationship(i);
+                    PackagePart slidePart = mainDocument.getRelatedPart(rel);
+                    slideMap.put(rel.getId(), slidePart);
+                } catch (InvalidFormatException e) {
+                    metadata.add(TikaCoreProperties.TIKA_META_EXCEPTION_WARNING,
+                            ExceptionUtils.getStackTrace(e));
+                }
+            }
+        }
+        return slideMap;
+    }
+
+    /**
+     * SAX handler to parse presentation.xml and extract slide order
+     */
+    private static class PresentationOrderHandler extends DefaultHandler {
+        private final List<String> correctOrder;
+        private boolean inSldIdLst = false;
+        private boolean inSldId = false;
+
+        public PresentationOrderHandler(List<String> correctOrder) {
+            this.correctOrder = correctOrder;
+        }
+
+        @Override
+        public void startElement(String uri, String localName, String qName, Attributes atts) throws SAXException {
+            if ("sldIdLst".equals(localName)) {
+                inSldIdLst = true;
+            } else if ("sldId".equals(localName) && inSldIdLst) {
+                inSldId = true;
+                String relId = atts.getValue("r:id");
+                if (relId != null) {
+                    correctOrder.add(relId);
+                }
+            }
+        }
+
+        @Override
+        public void endElement(String uri, String localName, String qName) throws SAXException {
+            if ("sldIdLst".equals(localName)) {
+                inSldIdLst = false;
+            } else if ("sldId".equals(localName)) {
+                inSldId = false;
+            }
         }
     }
 
